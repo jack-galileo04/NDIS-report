@@ -1,0 +1,1203 @@
+---
+title: "analysis"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, messsage = FALSE)
+
+library(readxl)
+library(tidyverse)
+library(here)
+library(janitor)
+library(gridExtra)
+
+read_multiple_sheets <- function(filename) {
+  
+  sheets <- readxl::excel_sheets(filename)
+  tibble <- lapply(sheets, function(x) readxl::read_excel(filename, sheet = x))
+  df <- lapply(tibble, as.data.frame)
+  
+  names(df) <- sheets
+  
+  print(df)
+  
+}
+
+ndis_data <- read_multiple_sheets(here("Data/annualised_data.xlsx"))
+
+abs_data <- read_csv(here("Data/Projected population, Australia.csv"), skip = 1) |> 
+  rename(year = 1) |> 
+  janitor::clean_names() |> 
+  select(-5)
+
+abs_pop_dist <- read_excel(here("Data/abs_population_distribution.xlsx"), skip = 6) |> 
+  select(-2) |> 
+  select(1,2,6,10,13) |> 
+  rename("2022" = 2, "2023" = 3, "2024" = 4, "2025" = 5) |> 
+  mutate(sex = case_when(
+    Age == "Sex: Males" ~ "male",
+    Age == "Sex: Females" ~ "female",
+    Age == "Sex: Persons" ~ "total",
+    T ~ NA
+  )) |> 
+  fill(sex, .direction = "down") |> 
+  pivot_longer(cols = c("2022", "2023", "2024", "2025"),
+               names_to = "year", 
+               values_to = "population") |> 
+  filter(!is.na(population)) |> 
+  pivot_wider(id_cols = "Age", 
+              names_from = c(sex, year), 
+              values_from = population, 
+              names_glue = "{sex}_{year}") |> 
+  clean_names() |> 
+  mutate(age = as.numeric(age))
+```
+
+
+```{r}
+# ndis data
+
+participants_df <- ndis_data[[1]] |> 
+  janitor::clean_names() |> 
+  arrange(year)
+
+participation_rates_df <- bind_rows(ndis_data[-1]) |> 
+  janitor::clean_names() |> 
+  pivot_longer(
+    cols = c(male, female, total),
+    names_to = "sex", 
+    values_to = "value") |> 
+  pivot_wider(
+    names_from = c(year, sex),
+    values_from = value,
+    names_glue = "{year}_{sex}"
+  )
+```
+
+```{r}
+# abs data
+
+population_df <- abs_data |> 
+  slice_tail(n = 49)
+```
+
+```{r}
+# Participant Number and Budget Values
+
+scale <- max(participants_df$annualised_plan_budgets) / max(participants_df$number_of_participants)
+
+participants_df |> 
+  ggplot(aes(x = year)) + 
+  geom_col(aes(y = annualised_plan_budgets, fill = "Budget"), alpha = 0.5) +
+  geom_line(aes(y = number_of_participants * scale, colour = "Participants"), linewidth = 2) + 
+  scale_y_continuous(name = "Budget", 
+                     sec.axis = sec_axis(
+                       ~ . / scale,
+                       name = "Participants")
+                     ) +
+  scale_x_continuous(
+    labels = 2018:2025, 
+    breaks = 2018:2025
+    ) +
+  scale_colour_manual(
+    breaks = "Participants",
+    values = "black"
+  ) +
+  scale_fill_manual(
+    breaks = "Budget",
+    values = "orange"
+  ) +
+  labs(title = "Participant and Average Annualised Budgets over Time",
+       x = "Year", y = "Budget Value",
+       fill = NULL, colour = NULL)
+
+ggsave(filename = here("Plots/historical_budget_participants.png"))
+
+# Notice an upward trend in both participants and budget
+# Covid seemed to stagnate participants (no new entrants), with a downturn in budget 
+```
+
+```{r}
+participants_df |> 
+  ggplot(aes(year, avg_payment_per_particpant)) +
+  geom_area(linewidth = 2, alpha = 0.5, fill = "orange", colour = "black") + 
+  scale_x_continuous(labels = 2018:2025, breaks = 2018:2025) +
+  scale_y_continuous(limits = c(0, 90000)) +
+  labs(title = "Average Participant Payments over Time",
+       x = "Year", y = "Payment Amount")
+
+ggsave(filename = here("Plots/historical_participant_payments.png"))
+
+# Average participant payments are trending upwards overtime
+```
+```{r}
+participants_df |> 
+  mutate(utilisation = avg_payment_per_particpant / annualised_plan_budgets) |> 
+  ggplot(aes(year, utilisation)) +
+  geom_area(linewidth = 2, alpha = 0.5, fill = "orange", colour = "black") + 
+  scale_x_continuous(labels = 2018:2025, breaks = 2018:2025) +
+  scale_y_continuous(limits = c(0, 1.2)) +
+  labs(title = "Average Budget Utilisation per Participant",
+       x = "Year", y = "Payment Amount")
+
+ggsave(filename = here("Plots/historical_budget_utilisations.png"))
+
+# Utilisation is pretty flat but slightly trended upwards
+```
+```{r}
+population_df |>
+  ggplot(aes(x = year)) +
+  geom_line(aes(y = high_series / 1000000, colour = "High"), linewidth = 1.5) +
+  geom_line(aes(y = medium_series / 1000000, colour = "Medium"), linewidth = 1.5) +
+  geom_line(aes(y = low_series / 1000000, colour = "Low"), linewidth = 1.5) +
+  scale_x_continuous(breaks = seq(2020, 2070, by = 5), labels = seq(2020, 2070, by = 5)) +
+  scale_colour_manual(
+    breaks = c("High", "Medium", "Low"),
+    values = c("lightgreen", "black", "orange")
+  ) +
+  labs(title = "Population Projections",
+       x = "Year", y = "Population (Millions)",
+       colour = "Growth")
+
+ggsave(filename = here("Plots/total_population_projections.png"))
+# Population is trending upwards. Scenarios show different levels of plateu. 
+```
+
+```{r}
+# Participation Rates
+
+participation_rates_df |> 
+  select(age, ends_with("total")) |> 
+  pivot_longer(cols = c(2:5),
+               names_to = "year", 
+               values_to = "rate") |> 
+  mutate(year = str_extract(year, "^\\d+")) |> 
+  ggplot(aes(year, rate, fill = factor(age))) +
+  geom_col(position = position_dodge()) +
+  scale_fill_discrete(
+    breaks = c("0", "10", "20", "30", "40", "50", "60", "70")
+  ) +
+  labs(title = "Raw Participation Rates by Age",
+       x = "Year", y = "Rate (%)",
+       fill = "Age")
+
+ggsave(filename = here("Plots/raw_participation_rate_distributions.png"))
+```
+Participation rates were only recorded for these ages. Spline interpolation to graduate these for each age will be applied.
+
+```{r}
+# Graduation
+
+ages_1 <- seq(0, 70, by = 1)
+
+smoothed_participation_rates <- tibble(ages_1, .rows = length(0:70))
+
+rates_spline <- lapply(participation_rates_df[-1], function(y){
+  spline(
+    x = participation_rates_df$age,
+    y = y,
+    xout = ages_1,
+    method = "natural"
+  )$y
+})
+
+smoothed_participation_rates <- cbind(age = ages_1, as.data.frame(rates_spline) |> 
+                                        clean_names() |> 
+                                        rename_with(~ sub("^x", "", .x)))
+```
+
+```{r}
+# Smoothed Participation Rates
+
+smoothed_participation_rates |> 
+  select(age, ends_with("total")) |> 
+  pivot_longer(cols = c(2:5),
+               names_to = "year", 
+               values_to = "rate") |> 
+  mutate(year = str_extract(year, "^\\d+")) |> 
+  ggplot(aes(year, rate, fill = factor(age))) +
+  geom_col(position = position_dodge()) +
+  scale_fill_discrete(
+    breaks = c("0", "10", "20", "30", "40", "50", "60", "70")
+  ) +
+  labs(
+    title = "Smoothed Participation Rates by Age",
+       x = "Year", y = "Rate (%)",
+       fill = "Age"
+    )
+
+ggsave(filename = here("Plots/smoothed_participation_rate_distributions.png"))
+```
+
+```{r}
+# Only considering total
+
+smoothed_participation_rates <- smoothed_participation_rates |> 
+  select(age, ends_with("_total"))
+```
+
+```{r}
+# Population Distribution
+
+population_dist <- (abs_pop_dist[,-1] / colSums(abs_pop_dist[,-1])) |> 
+  mutate(age = 0:100) |> 
+  select(age, starts_with("total"))
+
+lowess <- lapply(population_dist[-1], function(y){
+  lowess(
+    x = population_dist$age,
+    y = y,
+    f = 0.3)$y / sum(y)
+})
+
+smoothed_population_dist <- cbind(age = population_dist$age, as.data.frame(lowess)) |> 
+  rename("2022" = "total_2022",
+         "2023" = "total_2023",
+         "2024" = "total_2024",
+         "2025" = "total_2025",)
+
+colSums(smoothed_population_dist)
+```
+
+```{r}
+smoothed_population_dist |> 
+  ggplot(aes(age)) +
+  geom_line(aes(y=`2022`, colour = "2022"), linewidth = 1.5) +
+  geom_line(aes(y=`2023`, colour = "2023"), linewidth = 1.5) +
+  geom_line(aes(y=`2024`, colour = "2024"), linewidth = 1.5) +
+  geom_line(aes(y=`2025`, colour = "2025"), linewidth = 1.5) +
+  labs(
+    title = "Smoothed Population Distributions",
+    x = "Age", y = "Density",
+    colour = "Year"
+  )
+
+ggsave(filename = here("Plots/smoothed_population_distributions.png"))
+```
+
+```{r}
+# Set 2025 as distribution
+
+fixed_pop_dist <- tibble(age = smoothed_population_dist$age, population_dist = smoothed_population_dist$`2025`)
+```
+
+```{r}
+participants_by_age <- (smoothed_participation_rates |> 
+  select(age, ends_with("_total")))[,-1]/100 *
+abs_pop_dist[1:71,2:5]
+
+participants_by_age <- participants_by_age |> 
+  mutate(age = 0:70) |> 
+  select(age, everything()) |> 
+  rename("2022" = "2022_total",
+         "2023" = "2023_total",
+         "2024" = "2024_total",
+         "2025" = "2025_total",)
+
+# Proportions male to female are around 0.986. Assume 50/50
+```
+
+```{r}
+# Participants by age plot
+
+participants_by_age |> 
+  pivot_longer(cols = c(2:5),
+               names_to = "year", 
+               values_to = "participants") |> 
+  ggplot(aes(year, participants, fill = factor(age))) +
+  geom_col(position = position_dodge()) +
+  scale_fill_discrete(
+    breaks = c("0", "10", "20", "30", "40", "50", "60", "70")
+  ) +
+  labs(title = "Participants by Age",
+       x = "Year", y = "Participants", fill = "Age")
+
+ggsave(filename = here("Plots/historical_participant_distribution.png"))
+```
+
+```{r}
+mean(participants_by_age |> select(-age) |> colSums() / # Over shoots a bit
+participants_df$number_of_participants[5:8])
+
+# Rounding error scale factor?
+scale <- 1.1
+```
+
+# Modelling
+
+Key Assumptions:
+
+1) Overall participant growth converges to the national population growth.
+2) Population distribution by age, is fixed at the 2025 population distribution (no mortality, fertility assumptions)
+3) Male and Female will be fixed at 50%, and modelled together (as costs are assumed to be the same)
+4) Fix participation rates at 2025 level (this will be varied)
+5) Average budget forecasted by arima(0,1,0) (this will be varied)
+6) Average payments forecasted by arima(0,1,0) with budget as a regression input (payments will likely follow budget as they are bounded by it)
+7) Only consider active vs not active.
+
+Current Notes: Participation rates have rounding errors (slightly different to total number of participants)
+
+```{r}
+# ARIMA(0,1,0) for plan budgets
+
+avgcost_fit <- auto.arima(participants_df$annualised_plan_budgets)
+
+# ARIMA(0,1,0) with differenced budget for payments
+
+avgpayment_fit <- Arima(participants_df$avg_payment_per_particpant, order = c(0,1,0), 
+      xreg = participants_df$annualised_plan_budgets)
+```
+
+```{r}
+# Average Budget Cost Forecast
+
+avgcost_forecast <- forecast(avgcost_fit, h = 15) |> as.data.frame(row.names = NULL) |> 
+  mutate(year = 2026:2040) |> 
+  clean_names() |> 
+  bind_rows(participants_df |> select(year, point_forecast = annualised_plan_budgets)) |> 
+  arrange(year) |> 
+  mutate(across(2:5, ~ifelse(is.na(.x), point_forecast, .x)))
+```
+
+```{r}
+# Average Payment Forecast
+
+avgpayment_forecast <- forecast(avgpayment_fit, h = 15, 
+         xreg = avgcost_forecast$point_forecast) |> as.data.frame(row.names = NULL) |> 
+  mutate(year = 2018:2040) |> 
+  clean_names() |> 
+  arrange(year) |> 
+  mutate(across(2:5, ~ifelse(is.na(.x), point_forecast, .x)))
+```
+
+
+Obviously a linear model is not a great assumption. The population is forecasted to increase at a decreasing rate, indicating that participation would eventually outgrow population if it were linear. 
+
+Due to the following:
+
+a) The scheme maturity is quite young, leading to rapid early growth as the scheme meets existing demand.
+
+b) The number of participants is bounded by the population.
+
+A reasonable assumption is that long run participant growth, is proportional to population growth. Further refinements can be made, including segmenting growth within each gender and age group, capturing the future age composition of Australia.
+
+```{r}
+# Overall population growth assumption
+
+participation_forecast <- population_df |> 
+  slice_tail(n = 42) |> 
+  slice_head(n = 16) |> 
+  mutate(across(2:4, ~ .x / first(.x) * participants_df[8,3])) |> 
+  rename(
+    participation_high = high_series, 
+    participation_medium = medium_series, 
+    participation_low = low_series
+  ) |> 
+  mutate(
+    total_cost_forecast_medium = participation_medium * avgcost_forecast[8:23,1],
+    total_cost_forecast_high = participation_high * avgcost_forecast[8:23,1],
+    total_cost_forecast_low = participation_low * avgcost_forecast[8:23,1])
+```
+
+```{r}
+participants_df |> 
+  mutate(utilisation = avg_payment_per_particpant / annualised_plan_budgets)
+```
+
+
+```{r}
+# Calculating Baseline Participation Distribution
+
+baseline_dist <- smoothed_participation_rates |> 
+  select(age, 5) |> 
+  rename(participation_dist = "2025_total") |> 
+  mutate(participation_dist = participation_dist / 100) |> 
+  mutate(population_dist = fixed_pop_dist[1:71,2]) |> 
+  unnest(population_dist) |> 
+  mutate(baseline_dist = participation_dist * population_dist / scale)
+```
+
+```{r}
+# Forecasting Number of Participants
+
+base_participant_forecast <- matrix(NA, nrow = 71, ncol = length(2025:2040))
+high_participant_forecast <- matrix(NA, nrow = 71, ncol = length(2025:2040))
+low_participant_forecast <- matrix(NA, nrow = 71, ncol = length(2025:2040))
+
+for(j in 1:ncol(base_participant_forecast)){
+  base_participant_forecast[,j] <- as.numeric(population_df[j + 7, 3]) * baseline_dist$baseline_dist
+  high_participant_forecast[,j] <- as.numeric(population_df[j + 7, 2]) * baseline_dist$baseline_dist
+  low_participant_forecast[,j] <- as.numeric(population_df[j + 7, 4]) * baseline_dist$baseline_dist
+}
+
+
+colnames(base_participant_forecast) <- 2025:2040
+colnames(high_participant_forecast) <- 2025:2040
+colnames(low_participant_forecast) <- 2025:2040
+```
+
+```{r}
+# Base participant forecast plot
+
+c1 <- base_participant_forecast |> 
+  as_tibble() |> 
+  mutate(age = 0:70) |> 
+  select(age, everything()) |> 
+  pivot_longer(cols = c(2:17),
+               names_to = "year",
+               values_to = "participants") |> 
+  mutate(year = as.numeric(year)) |> 
+  filter(year %% 2 == 0) |> 
+  ggplot(aes(year, participants, fill = factor(age))) +
+  geom_col(position = position_dodge()) +
+  scale_fill_discrete(
+    breaks = c("0", "10", "20", "30", "40", "50", "60", "70")
+  ) +
+  scale_x_continuous(
+    breaks = seq(2026, 2040, by = 2),
+    labels = seq(2026, 2040, by = 2)
+  ) +
+  labs(title = "Base Case Participation Distribution Forecast",
+       x = "Year", y = "Participants",
+       fill = "Age")
+c1
+
+ggsave(filename = here("Plots/base_case_participation_distribution_forecast.png"))
+```
+
+```{r}
+overall_forecast <- tibble(year = 2025:2040,
+       participation_base = colSums(base_participant_forecast),
+       participation_high = colSums(high_participant_forecast),
+       participation_low = colSums(low_participant_forecast)
+       ) |> 
+  bind_rows(
+    tibble(year = participants_df[-8,1], 
+           participation_high = participants_df[-8,3],
+           participation_base = participants_df[-8,3],
+           participation_low = participants_df[-8,3])
+  ) |> 
+  arrange(year) |> 
+  mutate(
+    total_cost_forecast_base_mean = participation_base * avgcost_forecast[,2],
+    total_cost_forecast_high_mean = participation_high * avgcost_forecast[,2],
+    total_cost_forecast_low_mean = participation_low * avgcost_forecast[,2],
+    total_cost_forecast_base_high = participation_base * avgcost_forecast[,5],
+    total_cost_forecast_high_high = participation_high * avgcost_forecast[,5],
+    total_cost_forecast_low_high = participation_low * avgcost_forecast[,5],
+    total_cost_forecast_base_low = participation_base * avgcost_forecast[,4],
+    total_cost_forecast_high_low = participation_high * avgcost_forecast[,4],
+    total_cost_forecast_low_low = participation_low * avgcost_forecast[,4]
+    )
+```
+
+```{r}
+(matrix(rep(avgcost_forecast$point_forecast[-1:-7]), nrow = 71, ncol = 16, byrow = TRUE) * base_participant_forecast) |> 
+  as_tibble() |> 
+  mutate(age = 0:70) |> 
+  select(age, everything()) |> 
+  pivot_longer(cols = c(2:17),
+               names_to = "year",
+               values_to = "costs") |> 
+  mutate(year = as.numeric(year)) |> 
+  filter(year %% 2 == 0) |> 
+  ggplot(aes(year, costs / 1000000000, fill = factor(age))) +
+  geom_col(position = position_dodge()) +
+  scale_fill_discrete(
+    breaks = c("0", "10", "20", "30", "40", "50", "60", "70")
+  ) +
+  scale_x_continuous(
+    breaks = seq(2026, 2040, by = 2),
+    labels = seq(2026, 2040, by = 2)
+  ) +
+  labs(title = "Base Case Cost Distribution Forecast",
+       x = "Year", y = "Costs (Billions)",
+       fill = "Age")
+
+ggsave(filename = here("Plots/base_case_cost_distribution_forecast.png"))
+```
+
+
+```{r}
+# Participant Forecast Plot
+
+overall_forecast |> 
+  bind_rows(
+    tibble(year = participants_df[-8,1], 
+           participation_high = participants_df[-8,3],
+           participation_base = participants_df[-8,3],
+           participation_low = participants_df[-8,3])
+  ) |> 
+  arrange(year) |> 
+  select(-(5:7)) |> 
+  pivot_longer(cols = c(2:4),
+               names_to = "scenario",
+               values_to = "participation") |> 
+  mutate(scenario = ifelse(year < 2025, "participation_base", scenario)) |> 
+  ggplot(aes(x = year, participation / 1000, colour = factor(scenario))) +
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025, linetype = "dashed", colour = "grey50"
+  ) +
+  annotate(
+    "rect", 
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_colour_manual(
+    values = c("black", "lightgreen", "orange"),
+    labels = c("Base", "High", "Low")
+    ) + 
+  scale_x_continuous(
+    breaks = seq(2018, 2040, by = 2),
+    labels = seq(2018, 2040, by = 2)
+    ) +
+  scale_y_continuous(
+    breaks = seq(200, 1000, by = 100),
+    labels = seq(200, 1000, by = 100),
+    limits = c(200, 1000)
+  ) +
+  labs(
+    title = "Forecasted Total Participants",
+    x = "Year", y = "Participants (1000s)",
+    colour = "Population Growth"
+  )
+
+ggsave(filename = here("Plots/forecasted_total_participants.png"))
+```
+
+```{r}
+overall_forecast |> 
+  bind_rows(
+    tibble(year = participants_df[-8,1], 
+           participation_high = participants_df[-8,3],
+           participation_base = participants_df[-8,3],
+           participation_low = participants_df[-8,3],
+           total_cost_forecast_base_mean = participants_df[-8,3] * participants_df[-8,2],
+           total_cost_forecast_high_mean = participants_df[-8,3] * participants_df[-8,2],
+           total_cost_forecast_low_mean = participants_df[-8,3] * participants_df[-8,2],
+           total_cost_forecast_base_high = participants_df[-8,3] * participants_df[-8,2],
+           total_cost_forecast_high_high = participants_df[-8,3] * participants_df[-8,2],
+           total_cost_forecast_low_high = participants_df[-8,3] * participants_df[-8,2],
+           total_cost_forecast_base_low = participants_df[-8,3] * participants_df[-8,2],
+           total_cost_forecast_high_low = participants_df[-8,3] * participants_df[-8,2],
+           total_cost_forecast_low_low = participants_df[-8,3] * participants_df[-8,2])
+  ) |> 
+  arrange(year) |> 
+  select(-2:-4) |> 
+  pivot_longer(cols = c(2:10),
+               names_to = "scenario",
+               values_to = "cost") |> 
+  separate(scenario, into = c("pop_scenario", "avgcost_scenario"), sep = "_(?=[^_]+$)") |> 
+  mutate(pop_scenario = ifelse(year < 2025, "total_cost_forecast_base", pop_scenario)) |> 
+  mutate(pop_scenario = fct_reorder(pop_scenario, cost),
+         avgcost_scenario = fct_reorder(avgcost_scenario, cost),
+         avgcost_scenario = fct_recode(avgcost_scenario, Low = "low", High = "high", Baseline = "mean")) |> 
+  ggplot(aes(year, cost / 1000000000, colour = pop_scenario)) +
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025, linetype = "dashed", colour = "grey50"
+  ) +
+  annotate(
+    "rect", 
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_colour_manual(
+    values = c("black", "orange", "lightgreen"),
+    labels = c("Base", "Low", "High")
+    ) + 
+  scale_x_continuous(
+    breaks = seq(2018, 2040, by = 5),
+    labels = seq(2018, 2040, by = 5)
+    ) +
+  scale_y_continuous(
+    breaks = seq(10, 170, by = 20),
+    labels = seq(10, 170, by = 20),
+    limits = c(10, 170)
+  ) +
+  facet_grid(cols = vars(avgcost_scenario), scales = "fixed") +
+  labs(
+    title = "Forecasted Total Approved Cost By Budget Scenario",
+    x = "Year", y = "Cost (Billions)",
+    colour = "Population Growth"
+  )
+
+ggsave(filename = here("Plots/forecasted_total_approved_cost.png"))
+```
+
+Scenarios:
+
+Status Quo: (Base budget growth, base population growth) *
+
+Admissions Reform: Change in policy (tighter eligibility for children under 10 years old) X
+
+Adverse: economic downturn + high demand (high participation growth, high cost growth) *
+
+High Pressure: higher entry rates + service utilisation (high participation growth, more payments/utilisation) *
+
+```{r}
+# Status Quo
+# Base Participation Growth, Moderate Payment Growth, Moderate Budget Growth
+
+baseline_df <- bind_cols(
+  avgpayment_forecast |> select(year, payment = point_forecast),
+  avgcost_forecast |> select(budget = point_forecast),
+  overall_forecast |> select(participation = participation_base)
+) |> 
+  mutate(utilisation = payment / budget,
+         total_budget = budget * participation,
+         total_payment = payment * participation,
+         total_utilisation = total_payment / total_budget)
+```
+
+```{r}
+# Status Quo scenario plots
+
+p1 <- baseline_df |> 
+  ggplot(aes(year, total_payment / 1000000000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(25, 100, by = 25),
+    breaks = seq(25, 100, by = 25)
+  ) +
+  labs(
+    x = "Year", y = "Total Payments (Billions)"
+  )
+
+p2 <- baseline_df |> 
+  ggplot(aes(year, total_budget / 1000000000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(25, 125, by = 25),
+    breaks = seq(25, 125, by = 25)
+  ) +
+  labs(
+    x = "Year", y = "Services Budget (Billions)"
+  )
+
+p3 <- baseline_df |> 
+  ggplot(aes(year, participation / 1000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(200, 1000, by = 200),
+    breaks = seq(200, 1000, by = 200)
+  ) +
+  labs(
+    x = "Year", y = "Total Participants (1000s)"
+  )
+
+p4 <- baseline_df |> 
+  ggplot(aes(year, utilisation)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  labs(
+    x = "Year", y = "Services Budget Utilisation"
+  )
+
+g <- grid.arrange(p1,p2,p3,p4, 
+             top = "Status Quo Scenario: Forecasts", 
+             bottom = "Baseline participation, moderate payment and budget growth."
+             )
+
+ggsave(g, filename = here("Plots/status_quo_scenario_forecasts.png"))
+```
+```{r}
+baseline_df |> 
+  filter(year %in% c(2025, 2040))
+```
+
+
+
+```{r}
+# High Pressure
+# High Participation Growth, High Payment Growth, Moderate Budget Growth
+
+high_pressure_df <- bind_cols(
+  avgpayment_forecast |> select(year, payment = hi_95),
+  avgcost_forecast |> select(budget = point_forecast),
+  overall_forecast |> select(participation = participation_high)
+) |> 
+  mutate(utilisation = payment / budget,
+         total_budget = budget * participation,
+         total_payment = payment * participation,
+         total_utilisation = total_payment / total_budget)
+```
+
+```{r}
+# High Pressure Scenario Plots
+
+p1 <- high_pressure_df |> 
+  ggplot(aes(year, total_payment / 1000000000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(25, 125, by = 25),
+    breaks = seq(25, 125, by = 25)
+  ) +
+  labs(
+    x = "Year", y = "Total Payments ($ Billions)"
+  )
+
+p2 <- high_pressure_df |> 
+  ggplot(aes(year, total_budget / 1000000000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(25, 125, by = 25),
+    breaks = seq(25, 125, by = 25)
+  ) +
+  labs(
+    x = "Year", y = "Services Budget ($ Billions)"
+  )
+
+p3 <- high_pressure_df |> 
+  ggplot(aes(year, participation / 1000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(200, 1000, by = 200),
+    breaks = seq(200, 1000, by = 200)
+  ) +
+  labs(
+    x = "Year", y = "Total Participants (1000s)"
+  )
+
+p4 <- high_pressure_df |> 
+  ggplot(aes(year, total_utilisation)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  labs(
+    x = "Year", y = "Services Budget Utilisation"
+  )
+
+g <- grid.arrange(p1,p2,p3,p4, 
+             top = "High Pressure Scenario: Forecasts", 
+             bottom = "High demand and high utilisation."
+             )
+
+ggsave(g, filename = here("Plots/high_pressure_scenario_forecasts.png"))
+```
+```{r}
+high_pressure_df |> 
+  filter(year %in% c(2025, 2040))
+```
+
+
+```{r}
+# Adverse Scenario
+# High Participation Growth, High Payment Growth, High Budget Growth
+
+adverse_df <- bind_cols(
+  avgpayment_forecast |> select(year, payment = hi_95),
+  avgcost_forecast |> select(budget = hi_95),
+  overall_forecast |> select(participation = participation_high)
+) |> 
+  mutate(utilisation = payment / budget,
+         total_budget = budget * participation,
+         total_payment = payment * participation,
+         total_utilisation = total_payment / total_budget)
+```
+
+```{r}
+# Adverse Scenario Plots
+
+p1 <- adverse_df |> 
+  ggplot(aes(year, total_payment / 1000000000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(25, 125, by = 25),
+    breaks = seq(25, 125, by = 25)
+  )
+  labs(
+    x = "Year", y = "Total Payments ($ Billions)"
+  )
+
+p2 <- adverse_df |> 
+  ggplot(aes(year, total_budget / 1000000000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  labs(
+    x = "Year", y = "Services Budget ($ Billions)"
+  )
+
+p3 <- adverse_df |> 
+  ggplot(aes(year, participation / 1000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  labs(
+    x = "Year", y = "Total Participants (1000s)"
+  )
+
+p4 <- adverse_df |> 
+  ggplot(aes(year, total_utilisation)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(200, 1000, by = 200),
+    breaks = seq(200, 1000, by = 200)
+  ) +
+  labs(
+    x = "Year", y = "Services Budget Utilisation"
+  )
+
+g <- grid.arrange(p1,p2,p3,p4, 
+             top = "Advserse Scenario: Forecasts",
+             bottom = "High demand and high costs.")
+
+ggsave(g, filename = here("Plots/adverse_scenario_forecasts.png"))
+```
+```{r}
+adverse_df |> 
+  filter(year %in% c(2025, 2040))
+```
+
+```{r}
+# Eligibility Reform
+# Eligibility for children under 10 tightening. Gradual decline, assume reciprocal of growth rate since 2018.
+
+base_participant_forecast
+
+reform_age_mat <- smoothed_participation_rates |> 
+  slice_head(n = 10) |> 
+  column_to_rownames(var = "age") |> 
+  as.matrix()
+
+reform_growth_mat <- t(apply(reform_age_mat, 1, function(x){
+  x / lag(x)
+}))
+```
+
+```{r}
+# Sigmoid Curve
+
+ginf <- rep(0.8, 9) # For medium term, assume that young cohort shrinks as children age out and less come in
+g0 <- 1/reform_growth_mat[-1,4] # Initial shrinkage is the reciprocal of last years growth
+turning_point <- 2030 # First shrink year
+k <- 0.8 # Speed of reversion
+years <- 2026:2040
+t <- years - turning_point
+
+growth_path <- ginf + (g0 - ginf) %*% t(1+exp(k * (t-3)))^(-1)
+rownames(growth_path) <- 1:9
+colnames(growth_path) <- years
+
+growth_path <- growth_path |> rbind(matrix(1, nrow = 62, ncol = 15))
+```
+
+```{r}
+# Forecasting Number of Participants
+
+reform_participant_forecast <- matrix(NA, nrow = 71, ncol = length(2025:2040))
+reform_participant_forecast[,1] <- as.numeric(population_df[8, 3]) * baseline_dist$baseline_dist
+colnames(reform_participant_forecast) <- 2025:2040
+rownames(reform_participant_forecast) <- 0:70
+
+for(j in 2:ncol(base_participant_forecast)){
+  reform_participant_forecast[,j] <- as.numeric(population_df[j + 7, 3]) * baseline_dist$baseline_dist * growth_path[,j-1]
+}
+
+reform_participation_df <- tibble(
+  year = 2025:2040,
+  participation = colSums(reform_participant_forecast)
+) |> 
+  bind_rows(overall_forecast |> select(year, participation = participation_base) |> filter(year<2025)) |> 
+  arrange(year)
+```
+
+```{r}
+c2 <- reform_participant_forecast |> as.data.frame() |> 
+  rownames_to_column("age") |> 
+  mutate(age = as.numeric(age)) |> 
+  pivot_longer(
+    cols = 2:17,
+    names_to = "year",
+    values_to = "participation") |> 
+  mutate(year = as.numeric(year)) |> 
+  filter(year %% 2 == 0) |> 
+  ggplot(aes(year, participation, fill = factor(age))) +
+  geom_col(position = position_dodge()) +
+  scale_fill_discrete(
+    breaks = c("0", "10", "20", "30", "40", "50", "60", "70")
+  ) +
+  scale_x_continuous(
+    breaks = seq(2026, 2040, by = 2),
+    labels = seq(2026, 2040, by = 2)
+  ) +
+  labs(
+    title = "Reform Distribution Forecast",
+    x = "Year", y = "Participants",
+    fill = "Age"
+  )
+c2
+
+ggsave(filename = here("Plots/reform_participation_distribution.png"))
+```
+
+
+```{r}
+# Eligibility Reform Scenario
+# Children under 10 years old have tightened eligibility to services
+
+reform_df <- bind_cols(
+  avgpayment_forecast |> select(year, payment = point_forecast),
+  avgcost_forecast |> select(budget = point_forecast),
+  reform_participation_df |> select(participation)
+) |> 
+  mutate(utilisation = payment / budget,
+         total_budget = budget * participation,
+         total_payment = payment * participation,
+         total_utilisation = total_payment / total_budget)
+```
+
+```{r}
+# High Pressure Scenario Plots
+
+p1 <- reform_df |> 
+  ggplot(aes(year, total_payment / 1000000000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(25, 100, by = 25),
+    breaks = seq(25, 100, by = 25)
+  ) +
+  labs(
+    x = "Year", y = "Total Payments ($ Billions)"
+  )
+
+p2 <- reform_df |> 
+  ggplot(aes(year, total_budget / 1000000000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(25, 125, by = 25),
+    breaks = seq(25, 125, by = 25)
+  ) +
+  labs(
+    x = "Year", y = "Services Budget ($ Billions)"
+  )
+
+p3 <- reform_df |> 
+  ggplot(aes(year, participation / 1000)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  scale_y_continuous(
+    labels = seq(200, 1000, by = 200),
+    breaks = seq(200, 1000, by = 200)
+  ) +
+  labs(
+    x = "Year", y = "Total Participants (1000s)"
+  )
+
+p4 <- reform_df |> 
+  ggplot(aes(year, total_utilisation)) + 
+  geom_line(linewidth = 2) +
+  geom_vline(
+    xintercept = 2025,
+    colour = "grey50",
+    linetype = "dashed"
+    ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = 2025,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2,
+    fill = "grey60"
+  ) +
+  labs(
+    x = "Year", y = "Services Budget Utilisation"
+  )
+
+g <- grid.arrange(p1,p2,p3,p4, 
+             top = "Eligibility Reform Scenario: Forecasts", 
+             bottom = "Status Quo population and economic environment, children elgibility tightening reform."
+             )
+
+ggsave(g, filename = here("Plots/eligibility_reform_scenario_forecasts.png"))
+```
+
+```{r}
+g <- grid.arrange(c1, c2, nrow = 2)
+
+ggsave(g, filename = here("Plots/participant_baseline_vs_reform_forecasts.png"))
+```
+
+```{r}
+knitr::purl("analysis.Rmd", output = "analysis_script.R")
+```
+
+
